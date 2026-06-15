@@ -331,7 +331,9 @@ export const attendanceApi = {
     isFieldWork?: boolean
     fieldLocation?: string
     fieldDescription?: string
-  }) => httpPost<AttendanceRecord>('/attendance/check-in', data),
+    latitude?: number
+    longitude?: number
+  }) => httpPost<AttendanceRecord & { outOfGeofence?: boolean; geofenceDistance?: number }>('/attendance/check-in', data),
 
   checkOut: (data: { employeeId: number; attendanceDate: string }) =>
     httpPost<AttendanceRecord>('/attendance/check-out', data),
@@ -374,6 +376,256 @@ export const attendanceApi = {
 
   approveMakeup: (data: { requestId: number; status: 'approved' | 'rejected'; approverId: number }) =>
     httpPost<MakeupRequest>('/attendance/makeup-approve', data),
+
+  autoCorrect: (date?: string) =>
+    httpPost<{ date: string; corrected: number; details: Array<{ employeeId: number; action: string }> }>('/attendance/auto-correct', { date }),
+}
+
+export interface ShiftSwapRequest {
+  id: number
+  requesterId: number
+  requesterName: string
+  targetEmployeeId: number | null
+  targetEmployeeName: string | null
+  swapType: 'shift_swap' | 'shift_exchange'
+  originalDate: string
+  targetDate: string | null
+  originalShiftId: number
+  originalShiftName: string
+  targetShiftId: number | null
+  targetShiftName: string | null
+  reason: string
+  targetConfirmed: boolean
+  status: string
+  approverId: number | null
+  approverName: string | null
+  approvedAt: string | null
+  createdAt: string
+}
+
+export interface BusinessTripRequest {
+  id: number
+  employeeId: number
+  employeeName: string
+  employeeNo: string
+  departmentName: string | null
+  destination: string
+  startDate: string
+  endDate: string
+  purpose: string
+  status: string
+  approverId: number | null
+  approverName: string | null
+  approvedAt: string | null
+  createdAt: string
+}
+
+export interface OfficeLocation {
+  id: number
+  name: string
+  latitude: number
+  longitude: number
+  radius: number
+  isDefault: boolean
+  createdAt: string
+}
+
+export interface SalaryRule {
+  id: number
+  employeeId: number | null
+  employeeName: string | null
+  employeeNo: string | null
+  baseSalary: number
+  lateDeduction: number
+  earlyLeaveDeduction: number
+  absentDeductionRatio: number
+  overtimeWeekdayRate: number
+  overtimeWeekendRate: number
+  overtimeHolidayRate: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SalaryDetail {
+  employeeId: number
+  employeeName: string
+  employeeNo: string
+  departmentName: string | null
+  baseSalary: number
+  lateCount: number
+  lateDeduction: number
+  earlyLeaveCount: number
+  earlyLeaveDeduction: number
+  absentCount: number
+  absentDeduction: number
+  overtimeHours: number
+  overtimePay: number
+  netSalary: number
+}
+
+export interface Notification {
+  id: number
+  employeeId: number
+  title: string
+  content: string
+  type: string
+  isRead: boolean
+  createdAt: string
+}
+
+export interface CalendarDayData {
+  date: string
+  normalCount: number
+  lateCount: number
+  absentCount: number
+  leaveCount: number
+  tripCount: number
+}
+
+export interface CalendarDayDetail {
+  employeeId: number
+  employeeName: string
+  employeeNo: string
+  departmentName: string | null
+  shiftName: string | null
+  startTime: string | null
+  endTime: string | null
+  checkIn: string | null
+  checkOut: string | null
+  status: string | null
+  checkInStatus: string | null
+  checkOutStatus: string | null
+  isFieldWork: boolean
+  isOnTrip: boolean
+  isOnLeave: boolean
+}
+
+export const swapApi = {
+  apply: (data: {
+    requesterId: number
+    swapType: 'shift_swap' | 'shift_exchange'
+    originalDate: string
+    targetDate?: string
+    targetEmployeeId?: number
+    originalShiftId: number
+    targetShiftId?: number
+    reason: string
+  }) => httpPost<{ id: number }>('/swap/apply', data),
+
+  confirm: (id: number, targetEmployeeId: number) =>
+    httpPost<null>(`/swap/confirm/${id}`, { targetEmployeeId }),
+
+  approve: (id: number, approverId: number, status: 'approved' | 'rejected') =>
+    httpPost<null>(`/swap/approve/${id}`, { approverId, status }),
+
+  getRequests: (params?: { employeeId?: number; status?: string; departmentId?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.employeeId) qs.set('employeeId', String(params.employeeId))
+    if (params?.status) qs.set('status', params.status)
+    if (params?.departmentId) qs.set('departmentId', String(params.departmentId))
+    return httpGet<ShiftSwapRequest[]>(`/swap/requests?${qs.toString()}`)
+  },
+
+  getMyRequests: (employeeId: number, status?: string) => {
+    const qs = new URLSearchParams({ employeeId: String(employeeId) })
+    if (status) qs.set('status', status)
+    return httpGet<ShiftSwapRequest[]>(`/swap/my?${qs.toString()}`)
+  },
+}
+
+export const tripApi = {
+  apply: (data: { employeeId: number; destination: string; startDate: string; endDate: string; purpose: string }) =>
+    httpPost<{ id: number }>('/trip/apply', data),
+
+  approve: (id: number, approverId: number, status: 'approved' | 'rejected') =>
+    httpPost<null>(`/trip/approve/${id}`, { approverId, status }),
+
+  getRequests: (params?: { employeeId?: number; status?: string; departmentId?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.employeeId) qs.set('employeeId', String(params.employeeId))
+    if (params?.status) qs.set('status', params.status)
+    if (params?.departmentId) qs.set('departmentId', String(params.departmentId))
+    return httpGet<BusinessTripRequest[]>(`/trip/requests?${qs.toString()}`)
+  },
+
+  check: (employeeId: number, date: string) =>
+    httpGet<{ hasTrip: boolean }>(`/trip/check?employeeId=${employeeId}&date=${date}`),
+}
+
+export const officeLocationApi = {
+  getAll: () => httpGet<OfficeLocation[]>('/office-locations/'),
+
+  create: (data: { name: string; latitude: number; longitude: number; radius?: number; isDefault?: boolean }) =>
+    httpPost<{ id: number }>('/office-locations/', data),
+
+  update: (id: number, data: Partial<OfficeLocation>) =>
+    httpPut<{ message: string }>(`/office-locations/${id}`, data),
+
+  delete: (id: number) => httpDelete<{ message: string }>(`/office-locations/${id}`),
+
+  getDefault: () => httpGet<OfficeLocation | null>('/office-locations/default'),
+}
+
+export const calendarApi = {
+  getMonthly: (year: number, month: number, departmentId?: number) => {
+    const qs = new URLSearchParams({ year: String(year), month: String(month) })
+    if (departmentId) qs.set('departmentId', String(departmentId))
+    return httpGet<CalendarDayData[]>(`/calendar/monthly?${qs.toString()}`)
+  },
+
+  getDailyDetail: (date: string, departmentId?: number) => {
+    const qs = new URLSearchParams({ date })
+    if (departmentId) qs.set('departmentId', String(departmentId))
+    return httpGet<CalendarDayDetail[]>(`/calendar/daily-detail?${qs.toString()}`)
+  },
+}
+
+export const salaryApi = {
+  getRules: (employeeId?: number) => {
+    const qs = employeeId ? `?employeeId=${employeeId}` : ''
+    return httpGet<SalaryRule[]>(`/salary/rules${qs}`)
+  },
+
+  createRule: (data: {
+    employeeId?: number | null
+    baseSalary: number
+    lateDeduction: number
+    earlyLeaveDeduction: number
+    absentDeductionRatio: number
+    overtimeWeekdayRate: number
+    overtimeWeekendRate: number
+    overtimeHolidayRate: number
+  }) => httpPost<{ id: number }>('/salary/rules', data),
+
+  updateRule: (id: number, data: Partial<SalaryRule>) =>
+    httpPut<{ message: string }>(`/salary/rules/${id}`, data),
+
+  deleteRule: (id: number) => httpDelete<{ message: string }>(`/salary/rules/${id}`),
+
+  calculate: (year: number, month: number, departmentId?: number, employeeId?: number) => {
+    const qs = new URLSearchParams({ year: String(year), month: String(month) })
+    if (departmentId) qs.set('departmentId', String(departmentId))
+    if (employeeId) qs.set('employeeId', String(employeeId))
+    return httpGet<SalaryDetail[]>(`/salary/calculate?${qs.toString()}`)
+  },
+
+  exportCsv: (year: number, month: number, departmentId?: number) => {
+    const qs = new URLSearchParams({ year: String(year), month: String(month) })
+    if (departmentId) qs.set('departmentId', String(departmentId))
+    return `${BASE_URL}/salary/export-csv?${qs.toString()}`
+  },
+}
+
+export const notificationApi = {
+  getList: (employeeId: number, unreadOnly?: boolean) => {
+    const qs = new URLSearchParams({ employeeId: String(employeeId) })
+    if (unreadOnly) qs.set('unreadOnly', 'true')
+    return httpGet<Notification[]>(`/notifications/?${qs.toString()}`)
+  },
+
+  markRead: (id: number) => httpPut<null>(`/notifications/read/${id}`),
+
+  markAllRead: (employeeId: number) => httpPut<null>('/notifications/read-all', { employeeId }),
 }
 
 // ==================== Leave / Overtime API ====================

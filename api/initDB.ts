@@ -137,6 +137,79 @@ function initDatabase() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (employee_id) REFERENCES employees(id)
     );
+
+    CREATE TABLE IF NOT EXISTS shift_swap_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      requester_id INTEGER NOT NULL,
+      target_employee_id INTEGER,
+      swap_type TEXT NOT NULL,
+      original_date DATE NOT NULL,
+      target_date DATE,
+      original_shift_id INTEGER NOT NULL,
+      target_shift_id INTEGER,
+      reason TEXT NOT NULL,
+      target_confirmed INTEGER DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      approver_id INTEGER,
+      approved_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (requester_id) REFERENCES employees(id),
+      FOREIGN KEY (target_employee_id) REFERENCES employees(id),
+      FOREIGN KEY (original_shift_id) REFERENCES shift_templates(id),
+      FOREIGN KEY (target_shift_id) REFERENCES shift_templates(id),
+      FOREIGN KEY (approver_id) REFERENCES employees(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS business_trips (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL,
+      destination TEXT NOT NULL,
+      start_date DATE NOT NULL,
+      end_date DATE NOT NULL,
+      purpose TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      approver_id INTEGER,
+      approved_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (employee_id) REFERENCES employees(id),
+      FOREIGN KEY (approver_id) REFERENCES employees(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS office_locations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      radius INTEGER NOT NULL DEFAULT 200,
+      is_default INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS salary_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER UNIQUE,
+      base_salary REAL NOT NULL DEFAULT 0,
+      late_deduction REAL NOT NULL DEFAULT 0,
+      early_leave_deduction REAL NOT NULL DEFAULT 0,
+      absent_deduction_ratio REAL NOT NULL DEFAULT 0,
+      overtime_weekday_rate REAL NOT NULL DEFAULT 1.5,
+      overtime_weekend_rate REAL NOT NULL DEFAULT 2.0,
+      overtime_holiday_rate REAL NOT NULL DEFAULT 3.0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (employee_id) REFERENCES employees(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'info',
+      is_read INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (employee_id) REFERENCES employees(id)
+    );
   `);
 
   const deptCount = db.prepare('SELECT COUNT(*) as count FROM departments').get() as { count: number };
@@ -268,6 +341,30 @@ function initDatabase() {
     const insertOT = db.prepare(`INSERT INTO overtime_requests (employee_id, overtime_date, duration, reason, status, approver_id, approved_at) VALUES (?, ?, ?, ?, 'approved', ?, CURRENT_TIMESTAMP)`);
     const otDate = new Date(); otDate.setDate(otDate.getDate() - 4);
     insertOT.run(3, otDate.toISOString().split('T')[0], 3, '项目上线加班调试', 1);
+
+    const insertOffice = db.prepare(`INSERT INTO office_locations (name, latitude, longitude, radius, is_default) VALUES (?, ?, ?, ?, ?)`);
+    insertOffice.run('总部大厦', 39.9042, 116.4074, 200, 1);
+    insertOffice.run('科技园分部', 39.9842, 116.3074, 300, 0);
+
+    const insertSalaryRules = db.prepare(`INSERT INTO salary_rules (employee_id, base_salary, late_deduction, early_leave_deduction, absent_deduction_ratio, overtime_weekday_rate, overtime_weekend_rate, overtime_holiday_rate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    insertSalaryRules.run(null, 8000, 50, 50, 0.1, 1.5, 2.0, 3.0);
+    insertSalaryRules.run(1, 15000, 100, 100, 0.05, 1.5, 2.0, 3.0);
+    insertSalaryRules.run(2, 10000, 50, 50, 0.08, 1.5, 2.0, 3.0);
+    insertSalaryRules.run(3, 11000, 50, 50, 0.08, 1.5, 2.0, 3.0);
+    insertSalaryRules.run(4, 11000, 50, 50, 0.08, 1.5, 2.0, 3.0);
+    insertSalaryRules.run(5, 9000, 50, 50, 0.1, 1.5, 2.0, 3.0);
+    insertSalaryRules.run(6, 14000, 100, 100, 0.05, 1.5, 2.0, 3.0);
+    insertSalaryRules.run(7, 9000, 50, 50, 0.1, 1.5, 2.0, 3.0);
+    insertSalaryRules.run(8, 8500, 50, 50, 0.1, 1.5, 2.0, 3.0);
+
+    const insertNotification = db.prepare(`INSERT INTO notifications (employee_id, title, content, type) VALUES (?, ?, ?, ?)`);
+    insertNotification.run(2, '排班已发布', '本周排班已发布，请及时查看', 'info');
+    insertNotification.run(3, '补卡审批结果', '您提交的补卡申请已通过', 'success');
+
+    const insertTrip = db.prepare(`INSERT INTO business_trips (employee_id, destination, start_date, end_date, purpose, status, approver_id, approved_at) VALUES (?, ?, ?, ?, ?, 'approved', ?, CURRENT_TIMESTAMP)`);
+    const tripStart = new Date(); tripStart.setDate(tripStart.getDate() - 4);
+    const tripEnd = new Date(); tripEnd.setDate(tripEnd.getDate() - 3);
+    insertTrip.run(4, '上海客户现场', tripStart.toISOString().split('T')[0], tripEnd.toISOString().split('T')[0], '拜访重要客户进行项目交付', 1);
   }
 
   console.log('Database initialized successfully!');

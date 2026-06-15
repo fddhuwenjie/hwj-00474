@@ -18,6 +18,12 @@ import attendanceRoutes from './routes/attendance.js'
 import leaveRoutes from './routes/leave.js'
 import reportsRoutes from './routes/reports.js'
 import rulesRoutes from './routes/rules.js'
+import swapRoutes from './routes/swap.js'
+import tripRoutes from './routes/trip.js'
+import officeLocationRoutes from './routes/officeLocations.js'
+import calendarRoutes from './routes/calendar.js'
+import salaryRoutes from './routes/salary.js'
+import notificationRoutes from './routes/notifications.js'
 
 // for esm mode
 const __filename = fileURLToPath(import.meta.url)
@@ -42,6 +48,12 @@ app.use('/api/attendance', attendanceRoutes)
 app.use('/api/leave', leaveRoutes)
 app.use('/api/reports', reportsRoutes)
 app.use('/api/rules', rulesRoutes)
+app.use('/api/swap', swapRoutes)
+app.use('/api/trip', tripRoutes)
+app.use('/api/office-locations', officeLocationRoutes)
+app.use('/api/calendar', calendarRoutes)
+app.use('/api/salary', salaryRoutes)
+app.use('/api/notifications', notificationRoutes)
 
 /**
  * health

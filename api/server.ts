@@ -2,6 +2,7 @@
  * local server entry file, for local development
  */
 import app from './app.js';
+import './initDB.js';
 
 /**
  * start server with port

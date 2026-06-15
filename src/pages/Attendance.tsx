@@ -16,21 +16,25 @@ import {
   ThumbsUp,
   ThumbsDown,
   Loader2,
+  Plane,
+  Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
   attendanceApi,
   basicApi,
+  tripApi,
   type AttendanceRecord,
   type MakeupRequest,
   type Employee,
   type Department,
+  type BusinessTripRequest,
 } from '@/lib/api'
 
 const CURRENT_EMPLOYEE_ID = 1
 const IS_MANAGER = true
 
-type TabType = 'mine' | 'query' | 'makeup'
+type TabType = 'mine' | 'query' | 'makeup' | 'trip' | 'auto-correct'
 
 const STATUS_MAP: Record<string, { label: string; className: string }> = {
   normal: { label: '正常', className: 'bg-green-100 text-green-700 border-green-200' },
@@ -73,26 +77,28 @@ export default function Attendance() {
       <div className="mx-auto max-w-6xl px-4 py-8">
         <h1 className="mb-6 text-2xl font-bold text-gray-900">打卡管理</h1>
 
-        <div className="mb-6 flex gap-1 rounded-lg bg-gray-100 p-1">
+        <div className="mb-6 flex gap-1 rounded-lg bg-gray-100 p-1 overflow-x-auto">
           {(
             [
               { key: 'mine', label: '我的打卡', icon: LogIn },
               { key: 'query', label: '打卡查询', icon: Search },
               { key: 'makeup', label: '补卡申请', icon: FileText },
+              { key: 'trip', label: '出差申请', icon: Plane },
+              { key: 'auto-correct', label: '异常修正', icon: Zap },
             ] as const
           ).map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               onClick={() => setActiveTab(key)}
               className={cn(
-                'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition',
+                'flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-2.5 text-sm font-medium transition whitespace-nowrap',
                 activeTab === key
                   ? 'bg-white text-gray-900 shadow-sm'
                   : 'text-gray-600 hover:text-gray-900'
               )}
             >
               <Icon className="h-4 w-4" />
-              {label}
+              <span className="hidden sm:inline">{label}</span>
             </button>
           ))}
         </div>
@@ -100,6 +106,8 @@ export default function Attendance() {
         {activeTab === 'mine' && <MyCheckIn />}
         {activeTab === 'query' && <AttendanceQuery />}
         {activeTab === 'makeup' && <MakeupApplication />}
+        {activeTab === 'trip' && <BusinessTripTab />}
+        {activeTab === 'auto-correct' && <AutoCorrectTab />}
       </div>
     </div>
   )
@@ -116,6 +124,12 @@ function MyCheckIn() {
   const [checkingOut, setCheckingOut] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const [currentPosition, setCurrentPosition] = useState<{ latitude: number; longitude: number } | null>(null)
+  const [positionError, setPositionError] = useState('')
+  const [distanceToOffice, setDistanceToOffice] = useState<number | null>(null)
+  const [officeName, setOfficeName] = useState<string | null>(null)
+  const [outOfGeofence, setOutOfGeofence] = useState(false)
+  const [showFieldDescModal, setShowFieldDescModal] = useState(false)
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000)
@@ -147,31 +161,98 @@ function MyCheckIn() {
     loadTodayRecord()
   }, [])
 
+  useEffect(() => {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setCurrentPosition({ latitude: pos.coords.latitude, longitude: pos.coords.longitude })
+          setPositionError('')
+        },
+        (err) => {
+          setPositionError(err.message)
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+      )
+    }
+  }, [])
+
+  useEffect(() => {
+    if (currentPosition) {
+      const calcDistance = async () => {
+        try {
+          const res = await fetch(`/api/office-locations/`)
+          const data = await res.json()
+          if (data.success && data.data && data.data.length > 0) {
+            let minDist = Infinity
+            let closest: typeof data.data[0] | null = null
+            for (const office of data.data) {
+              const R = 6371000
+              const dLat = (office.latitude - currentPosition.latitude) * Math.PI / 180
+              const dLon = (office.longitude - currentPosition.longitude) * Math.PI / 180
+              const a = Math.sin(dLat / 2) ** 2 +
+                Math.cos(currentPosition.latitude * Math.PI / 180) * Math.cos(office.latitude * Math.PI / 180) *
+                Math.sin(dLon / 2) ** 2
+              const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+              const dist = R * c
+              if (dist < minDist) {
+                minDist = dist
+                closest = office
+              }
+            }
+            setDistanceToOffice(Math.round(minDist))
+            if (closest) {
+              setOfficeName(closest.name)
+              setOutOfGeofence(minDist > closest.radius)
+            }
+          }
+        } catch {}
+      }
+      calcDistance()
+    }
+  }, [currentPosition])
+
   const handleCheckIn = async () => {
     if (isFieldWork && (!fieldLocation.trim() || !fieldDescription.trim())) {
       setError('外勤打卡请填写地点和说明')
+      return
+    }
+    if (outOfGeofence && !isFieldWork && !showFieldDescModal) {
+      setShowFieldDescModal(true)
       return
     }
     setCheckingIn(true)
     setError('')
     setMessage('')
     try {
-      const res = isFieldWork
+      const checkInData: Parameters<typeof attendanceApi.checkIn>[0] = {
+        employeeId: CURRENT_EMPLOYEE_ID,
+        attendanceDate: getTodayDate(),
+        isFieldWork: isFieldWork || outOfGeofence,
+        fieldLocation: fieldLocation.trim() || (outOfGeofence ? `距${officeName}${distanceToOffice}米` : ''),
+        fieldDescription: fieldDescription.trim() || (outOfGeofence ? '不在办公地点范围内' : ''),
+        latitude: currentPosition?.latitude,
+        longitude: currentPosition?.longitude,
+      }
+      const res = isFieldWork && !outOfGeofence
         ? await attendanceApi.fieldCheckIn({
             employeeId: CURRENT_EMPLOYEE_ID,
             attendanceDate: getTodayDate(),
             fieldLocation: fieldLocation.trim(),
             fieldDescription: fieldDescription.trim(),
           })
-        : await attendanceApi.checkIn({
-            employeeId: CURRENT_EMPLOYEE_ID,
-            attendanceDate: getTodayDate(),
-          })
+        : await attendanceApi.checkIn(checkInData)
       if (res.success) {
-        setMessage('上班打卡成功！')
+        setMessage(outOfGeofence ? '外勤打卡成功！（不在办公地点范围内）' : '上班打卡成功！')
+        setShowFieldDescModal(false)
         await loadTodayRecord()
       } else {
-        setError(res.error || '打卡失败')
+        if (res.data && (res.data as any).outOfGeofence) {
+          setOutOfGeofence(true)
+          setShowFieldDescModal(true)
+          setError(res.error || '需要填写外勤说明')
+        } else {
+          setError(res.error || '打卡失败')
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : '打卡失败')
@@ -303,6 +384,56 @@ function MyCheckIn() {
             />
           </button>
         </div>
+
+        <div className="mb-4 rounded-lg bg-blue-50 p-3">
+          <div className="flex items-center gap-2 text-sm">
+            <MapPin className="h-4 w-4 text-blue-600" />
+            {currentPosition ? (
+              <span className="text-blue-800">
+                距{officeName || '办公点'}：<strong>{distanceToOffice !== null ? `${distanceToOffice}米` : '计算中...'}</strong>
+                {outOfGeofence && <span className="ml-2 text-orange-600 font-medium">（超出围栏范围）</span>}
+                {!outOfGeofence && distanceToOffice !== null && <span className="ml-2 text-green-600 font-medium">（在围栏范围内）</span>}
+              </span>
+            ) : (
+              <span className="text-blue-600">{positionError ? '无法获取位置' : '正在获取位置...'}</span>
+            )}
+          </div>
+        </div>
+
+        {outOfGeofence && !isFieldWork && (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-orange-200 bg-orange-50 p-4 text-orange-700">
+            <AlertCircle className="h-5 w-5 flex-shrink-0" />
+            <span className="text-sm">您当前不在办公地点范围内，打卡将自动标记为外勤，需填写外勤说明</span>
+          </div>
+        )}
+
+        {showFieldDescModal && outOfGeofence && (
+          <div className="mb-4 space-y-3 rounded-lg border border-orange-200 bg-orange-50 p-4">
+            <div className="text-sm font-medium text-orange-800">请填写外勤说明（不在办公地点范围内）</div>
+            <textarea
+              value={fieldDescription}
+              onChange={(e) => setFieldDescription(e.target.value)}
+              placeholder="请输入外勤说明原因..."
+              rows={3}
+              className="w-full resize-none rounded-lg border border-orange-300 px-3 py-2 text-sm outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setShowFieldDescModal(false); setOutOfGeofence(false) }}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleCheckIn}
+                disabled={checkingIn || !fieldDescription.trim()}
+                className="rounded-lg bg-orange-600 px-4 py-2 text-sm font-medium text-white hover:bg-orange-700 disabled:opacity-60"
+              >
+                {checkingIn ? <Loader2 className="h-4 w-4 animate-spin" /> : '确认外勤打卡'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {isFieldWork && (
           <div className="space-y-4 rounded-lg bg-gray-50 p-4">
@@ -887,6 +1018,282 @@ function MakeupApplication() {
             approvingId={approvingId}
             onApprove={handleApprove}
           />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function BusinessTripTab() {
+  const [form, setForm] = useState({
+    destination: '',
+    startDate: getTodayDate(),
+    endDate: getTodayDate(),
+    purpose: '',
+  })
+  const [myRequests, setMyRequests] = useState<BusinessTripRequest[]>([])
+  const [pendingApprovals, setPendingApprovals] = useState<BusinessTripRequest[]>([])
+  const [submitting, setSubmitting] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [approvingId, setApprovingId] = useState<number | null>(null)
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+
+  const loadData = async () => {
+    setLoading(true)
+    try {
+      const [mine, pending] = await Promise.all([
+        tripApi.getRequests({ employeeId: CURRENT_EMPLOYEE_ID }),
+        IS_MANAGER ? tripApi.getRequests({ status: 'pending' }) : null,
+      ])
+      if (mine.success) setMyRequests(mine.data || [])
+      if (pending?.success) setPendingApprovals(pending.data || [])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '加载失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { loadData() }, [])
+
+  const handleSubmit = async () => {
+    if (!form.destination.trim() || !form.purpose.trim()) {
+      setError('请填写目的地和事由')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    setMessage('')
+    try {
+      const res = await tripApi.apply({
+        employeeId: CURRENT_EMPLOYEE_ID,
+        destination: form.destination.trim(),
+        startDate: form.startDate,
+        endDate: form.endDate,
+        purpose: form.purpose.trim(),
+      })
+      if (res.success) {
+        setMessage('出差申请已提交')
+        setForm({ destination: '', startDate: getTodayDate(), endDate: getTodayDate(), purpose: '' })
+        await loadData()
+      } else {
+        setError(res.error || '提交失败')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '提交失败')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleApprove = async (id: number, status: 'approved' | 'rejected') => {
+    setApprovingId(id)
+    setError('')
+    setMessage('')
+    try {
+      const res = await tripApi.approve(id, CURRENT_EMPLOYEE_ID, status)
+      if (res.success) {
+        setMessage(status === 'approved' ? '已通过' : '已驳回')
+        await loadData()
+      } else {
+        setError(res.error || '操作失败')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '操作失败')
+    } finally {
+      setApprovingId(null)
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+        <h3 className="mb-4 flex items-center gap-2 text-lg font-semibold text-gray-900">
+          <Plane className="h-5 w-5 text-indigo-600" />
+          出差申请
+        </h3>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-gray-700">目的地</label>
+            <input type="text" value={form.destination} onChange={(e) => setForm({ ...form, destination: e.target.value })} placeholder="请输入出差目的地" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-gray-700">出差事由</label>
+            <input type="text" value={form.purpose} onChange={(e) => setForm({ ...form, purpose: e.target.value })} placeholder="请输入出差事由" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-gray-700">开始日期</label>
+            <input type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-gray-700">结束日期</label>
+            <input type="date" value={form.endDate} onChange={(e) => setForm({ ...form, endDate: e.target.value })} className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end">
+          <button onClick={handleSubmit} disabled={submitting} className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60">
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            提交申请
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
+          <XCircle className="h-5 w-5 flex-shrink-0" /><span>{error}</span>
+        </div>
+      )}
+      {message && (
+        <div className="flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 p-4 text-green-700">
+          <CheckCircle2 className="h-5 w-5 flex-shrink-0" /><span>{message}</span>
+        </div>
+      )}
+
+      <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="border-b border-gray-100 px-6 py-4">
+          <h3 className="flex items-center gap-2 text-lg font-semibold text-gray-900">
+            <Plane className="h-5 w-5 text-indigo-600" />我的出差申请
+          </h3>
+        </div>
+        <TripRequestList requests={myRequests} loading={loading} emptyText="暂无出差申请记录" showActions={false} />
+      </div>
+
+      {IS_MANAGER && (
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="border-b border-gray-100 px-6 py-4">
+            <h3 className="flex items-center gap-2 text-lg font-semibold text-gray-900">
+              <AlertCircle className="h-5 w-5 text-orange-500" />待审批出差申请
+            </h3>
+          </div>
+          <TripRequestList requests={pendingApprovals} loading={loading} emptyText="暂无待审批申请" showActions approvingId={approvingId} onApprove={handleApprove} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TripRequestList({ requests, loading, emptyText, showActions, approvingId, onApprove }: {
+  requests: BusinessTripRequest[]
+  loading: boolean
+  emptyText: string
+  showActions: boolean
+  approvingId?: number | null
+  onApprove?: (id: number, status: 'approved' | 'rejected') => void
+}) {
+  if (loading) return <div className="flex items-center justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-gray-400" /></div>
+  if (requests.length === 0) return <div className="py-12 text-center text-gray-500"><AlertCircle className="mx-auto mb-2 h-8 w-8 text-gray-400" />{emptyText}</div>
+  return (
+    <div className="divide-y divide-gray-100">
+      {requests.map((r) => (
+        <div key={r.id} className="px-6 py-4">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="flex-1 space-y-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="font-medium text-gray-900">{r.employeeName}</span>
+                <span className="text-sm text-gray-500">{r.startDate} ~ {r.endDate}</span>
+                <span className="inline-flex items-center rounded-md bg-blue-50 px-2 py-0.5 text-xs text-blue-700">目的地：{r.destination}</span>
+                <span className={cn('inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium', getStatusStyle(r.status).className)}>{getStatusStyle(r.status).label}</span>
+              </div>
+              <div className="text-sm text-gray-600">事由：{r.purpose}</div>
+              {r.approverName && <div className="text-xs text-gray-500">审批人：{r.approverName}{r.approvedAt && ` · ${r.approvedAt.slice(0, 16)}`}</div>}
+            </div>
+            {showActions && r.status === 'pending' && onApprove && (
+              <div className="flex gap-2">
+                <button onClick={() => onApprove(r.id, 'approved')} disabled={approvingId === r.id} className="inline-flex items-center gap-1 rounded-lg border border-green-200 bg-green-50 px-3 py-1.5 text-sm font-medium text-green-700 hover:bg-green-100 disabled:opacity-60">
+                  {approvingId === r.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <ThumbsUp className="h-4 w-4" />}通过
+                </button>
+                <button onClick={() => onApprove(r.id, 'rejected')} disabled={approvingId === r.id} className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-100 disabled:opacity-60">
+                  {approvingId === r.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <ThumbsDown className="h-4 w-4" />}驳回
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function AutoCorrectTab() {
+  const [date, setDate] = useState(getTodayDate())
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<{ date: string; corrected: number; details: Array<{ employeeId: number; action: string }> } | null>(null)
+  const [error, setError] = useState('')
+
+  const handleRun = async () => {
+    setRunning(true)
+    setError('')
+    setResult(null)
+    try {
+      const res = await attendanceApi.autoCorrect(date)
+      if (res.success && res.data) {
+        setResult(res.data)
+      } else {
+        setError(res.error || '执行失败')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '执行失败')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const actionLabels: Record<string, string> = {
+    marked_as_leave: '已标记为请假',
+    marked_as_business_trip: '已标记为出差(外勤)',
+    created_as_leave: '新建请假记录',
+    created_as_business_trip: '新建出差记录',
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+        <h3 className="mb-4 flex items-center gap-2 text-lg font-semibold text-gray-900">
+          <Zap className="h-5 w-5 text-indigo-600" />
+          考勤异常自动修正
+        </h3>
+        <p className="mb-4 text-sm text-gray-600">扫描指定日期所有已排班但无打卡记录的员工，根据已审批的请假/出差记录自动修正考勤状态。</p>
+        <div className="flex items-end gap-4">
+          <div className="flex-1">
+            <label className="mb-1.5 block text-sm font-medium text-gray-700">扫描日期</label>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
+          </div>
+          <button onClick={handleRun} disabled={running} className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60">
+            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
+            执行修正
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
+          <XCircle className="h-5 w-5 flex-shrink-0" /><span>{error}</span>
+        </div>
+      )}
+
+      {result && (
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="border-b border-gray-100 px-6 py-4">
+            <h3 className="flex items-center gap-2 text-lg font-semibold text-gray-900">
+              <CheckCircle2 className="h-5 w-5 text-green-600" />
+              修正结果 - {result.date}
+            </h3>
+            <p className="mt-1 text-sm text-gray-600">共修正 <strong>{result.corrected}</strong> 条记录</p>
+          </div>
+          {result.details.length > 0 ? (
+            <div className="divide-y divide-gray-100">
+              {result.details.map((d, i) => (
+                <div key={i} className="px-6 py-3 flex items-center gap-3">
+                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-indigo-100 text-xs font-medium text-indigo-700">{i + 1}</span>
+                  <span className="text-sm text-gray-700">员工ID: {d.employeeId}</span>
+                  <span className={cn('inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium', 'bg-blue-100 text-blue-700 border-blue-200')}>{actionLabels[d.action] || d.action}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="py-8 text-center text-gray-500">无需修正的记录</div>
+          )}
         </div>
       )}
     </div>

@@ -112,7 +112,7 @@ function checkHasApprovedLeave(employeeId: number, dateStr: string): boolean {
 }
 
 router.post('/check-in', (req: Request, res: Response): void => {
-  const { employeeId, attendanceDate, isFieldWork, fieldLocation, fieldDescription } = req.body
+  const { employeeId, attendanceDate, isFieldWork, fieldLocation, fieldDescription, latitude, longitude } = req.body
 
   if (!employeeId || !attendanceDate) {
     res.json({ success: false, error: '缺少必要参数' })
@@ -120,6 +120,54 @@ router.post('/check-in', (req: Request, res: Response): void => {
   }
 
   try {
+    let outOfGeofence = false
+    let geofenceDistance: number | null = null
+    let geofenceOfficeName: string | null = null
+
+    if (latitude !== undefined && longitude !== undefined) {
+      const offices = db.prepare('SELECT * FROM office_locations').all() as Array<{
+        id: number
+        name: string
+        latitude: number
+        longitude: number
+        radius: number
+        is_default: number
+      }>
+      let minDist = Infinity
+      let closestOffice: typeof offices[0] | null = null
+      for (const office of offices) {
+        const R = 6371000
+        const dLat = (office.latitude - latitude) * Math.PI / 180
+        const dLon = (office.longitude - longitude) * Math.PI / 180
+        const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(latitude * Math.PI / 180) * Math.cos(office.latitude * Math.PI / 180) *
+          Math.sin(dLon / 2) * Math.sin(dLon / 2)
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        const dist = R * c
+        if (dist < minDist) {
+          minDist = dist
+          closestOffice = office
+        }
+      }
+      if (closestOffice) {
+        geofenceDistance = Math.round(minDist)
+        geofenceOfficeName = closestOffice.name
+        outOfGeofence = minDist > closestOffice.radius
+      }
+    }
+
+    const forcedFieldWork = outOfGeofence && !isFieldWork
+    const finalIsFieldWork = isFieldWork || forcedFieldWork
+
+    if (forcedFieldWork && !fieldDescription) {
+      res.json({
+        success: false,
+        error: '您当前不在办公地点范围内，需填写外勤说明才能打卡',
+        data: { outOfGeofence: true, distance: geofenceDistance, officeName: geofenceOfficeName }
+      })
+      return
+    }
+
     const schedule = db.prepare(`
       SELECT s.*, st.start_time, st.end_time, st.core_start, st.core_end, st.next_day, st.type as shift_type
       FROM schedules s
@@ -173,8 +221,8 @@ router.post('/check-in', (req: Request, res: Response): void => {
         checkInTime,
         checkInStatus,
         finalStatus,
-        isFieldWork ? 1 : 0,
-        fieldLocation || null,
+        finalIsFieldWork ? 1 : 0,
+        fieldLocation || (forcedFieldWork ? `距${geofenceOfficeName}${geofenceDistance}米` : null),
         fieldDescription || null,
         existingRecord.id
       )
@@ -192,8 +240,8 @@ router.post('/check-in', (req: Request, res: Response): void => {
         finalStatus,
         checkInStatus,
         null,
-        isFieldWork ? 1 : 0,
-        fieldLocation || null,
+        finalIsFieldWork ? 1 : 0,
+        fieldLocation || (forcedFieldWork ? `距${geofenceOfficeName}${geofenceDistance}米` : null),
         fieldDescription || null
       )
     }
@@ -206,9 +254,11 @@ router.post('/check-in', (req: Request, res: Response): void => {
         checkInTime,
         checkInStatus,
         status: finalStatus,
-        isFieldWork: !!isFieldWork,
-        fieldLocation: fieldLocation || null,
-        fieldDescription: fieldDescription || null
+        isFieldWork: !!finalIsFieldWork,
+        fieldLocation: fieldLocation || (forcedFieldWork ? `距${geofenceOfficeName}${geofenceDistance}米` : null),
+        fieldDescription: fieldDescription || null,
+        outOfGeofence,
+        geofenceDistance
       }
     })
   } catch (err) {
@@ -791,6 +841,85 @@ router.post('/makeup-approve', (req: Request, res: Response): void => {
         approverId,
         approvedAt
       }
+    })
+  } catch (err) {
+    res.json({ success: false, error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+router.post('/auto-correct', (req: Request, res: Response): void => {
+  const { date } = req.body
+  const targetDate = date || new Date().toISOString().split('T')[0]
+
+  try {
+    const scheduledEmployees = db.prepare(`
+      SELECT s.employee_id
+      FROM schedules s
+      WHERE s.schedule_date = ? AND s.status = 'published'
+    `).all(targetDate) as Array<{ employee_id: number }>
+
+    let corrected = 0
+    const details: Array<{ employeeId: number; action: string }> = []
+
+    const tx = db.transaction(() => {
+      for (const emp of scheduledEmployees) {
+        const record = db.prepare(`
+          SELECT id, status FROM attendance_records
+          WHERE employee_id = ? AND attendance_date = ?
+        `).get(emp.employee_id, targetDate) as { id: number; status: string } | undefined
+
+        if (record && record.status === 'absent') {
+          const hasLeave = checkHasApprovedLeave(emp.employee_id, targetDate)
+
+          const hasTrip = db.prepare(`
+            SELECT id FROM business_trips
+            WHERE employee_id = ? AND status = 'approved' AND start_date <= ? AND end_date >= ?
+          `).get(emp.employee_id, targetDate, targetDate) as { id: number } | undefined
+
+          if (hasLeave) {
+            db.prepare(`
+              UPDATE attendance_records SET status = 'leave' WHERE id = ?
+            `).run(record.id)
+            corrected++
+            details.push({ employeeId: emp.employee_id, action: 'marked_as_leave' })
+          } else if (hasTrip) {
+            db.prepare(`
+              UPDATE attendance_records SET status = 'normal', is_field_work = 1, field_description = '出差' WHERE id = ?
+            `).run(record.id)
+            corrected++
+            details.push({ employeeId: emp.employee_id, action: 'marked_as_business_trip' })
+          }
+        } else if (!record) {
+          const hasLeave = checkHasApprovedLeave(emp.employee_id, targetDate)
+          const hasTrip = db.prepare(`
+            SELECT id FROM business_trips
+            WHERE employee_id = ? AND status = 'approved' AND start_date <= ? AND end_date >= ?
+          `).get(emp.employee_id, targetDate, targetDate) as { id: number } | undefined
+
+          if (hasLeave) {
+            db.prepare(`
+              INSERT INTO attendance_records (employee_id, attendance_date, status, check_in_status, check_out_status)
+              VALUES (?, ?, 'leave', NULL, NULL)
+            `).run(emp.employee_id, targetDate)
+            corrected++
+            details.push({ employeeId: emp.employee_id, action: 'created_as_leave' })
+          } else if (hasTrip) {
+            db.prepare(`
+              INSERT INTO attendance_records (employee_id, attendance_date, status, is_field_work, field_description, check_in_status, check_out_status)
+              VALUES (?, ?, 'normal', 1, '出差', NULL, NULL)
+            `).run(emp.employee_id, targetDate)
+            corrected++
+            details.push({ employeeId: emp.employee_id, action: 'created_as_business_trip' })
+          }
+        }
+      }
+    })
+
+    tx()
+
+    res.json({
+      success: true,
+      data: { date: targetDate, corrected, details }
     })
   } catch (err) {
     res.json({ success: false, error: err instanceof Error ? err.message : String(err) })

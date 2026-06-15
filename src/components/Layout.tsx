@@ -14,6 +14,9 @@ import {
   Building2,
   Menu,
   X,
+  ArrowLeftRight,
+  CalendarDays,
+  DollarSign,
 } from 'lucide-react'
 import { useAppStore, selectIsManager, type CurrentUser } from '@/store'
 import { cn } from '@/lib/utils'
@@ -29,6 +32,9 @@ const navItems: NavItem[] = [
   { path: '/schedule', label: '排班管理', icon: CalendarClock },
   { path: '/attendance', label: '打卡记录', icon: ClipboardList },
   { path: '/exceptions', label: '异常处理', icon: AlertTriangle },
+  { path: '/swap', label: '调班换班', icon: ArrowLeftRight },
+  { path: '/calendar', label: '团队日历', icon: CalendarDays },
+  { path: '/salary', label: '薪资报表', icon: DollarSign },
   { path: '/reports', label: '统计报表', icon: BarChart3 },
   { path: '/rules', label: '规则配置', icon: Settings },
 ]
